@@ -10,6 +10,90 @@ class CameraController {
     this.currentFacingMode = 'environment'; // Prefer rear camera for documents
     this.hasTorch = false;
     this.isTorchOn = false;
+    this.flashMode = 'on'; // 'on' (flash light fires on capture) | 'off'
+  }
+
+  /**
+   * Toggles flash-on-capture mode ('on' <-> 'off')
+   * @returns {string} current flash mode
+   */
+  toggleFlashMode() {
+    this.flashMode = (this.flashMode === 'on') ? 'off' : 'on';
+    return this.flashMode;
+  }
+
+  /**
+   * Checks if flash on capture is enabled
+   * @returns {boolean}
+   */
+  isFlashEnabled() {
+    return this.flashMode === 'on';
+  }
+
+  /**
+   * Triggers an animated screen flash burst for visual illumination and feedback
+   */
+  triggerScreenFlash() {
+    let overlay = document.getElementById('camera-flash-overlay');
+    if (!overlay && this.videoElement && this.videoElement.parentElement) {
+      overlay = document.createElement('div');
+      overlay.id = 'camera-flash-overlay';
+      overlay.className = 'camera-flash-overlay';
+      this.videoElement.parentElement.appendChild(overlay);
+    }
+    if (overlay) {
+      overlay.classList.add('flash-firing');
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          overlay.classList.remove('flash-firing');
+        }, 120);
+      });
+    }
+  }
+
+  /**
+   * Crops a canvas, bitmap or image to standard 9:16 portrait aspect ratio (centered).
+   * Ensures output canvas is always in 9:16 portrait mode.
+   * @param {HTMLCanvasElement|ImageBitmap|HTMLImageElement} source
+   * @param {HTMLCanvasElement} [targetCanvas]
+   * @returns {HTMLCanvasElement}
+   */
+  cropToPortrait916(source, targetCanvas = null) {
+    const srcW = source.width || source.naturalWidth || 1080;
+    const srcH = source.height || source.naturalHeight || 1920;
+
+    const targetRatio = 9 / 16; // 0.5625 portrait ratio
+    const currentRatio = srcW / srcH;
+
+    let cropX = 0;
+    let cropY = 0;
+    let cropW = srcW;
+    let cropH = srcH;
+
+    if (currentRatio > targetRatio) {
+      // Source is wider than 9:16 (e.g. landscape or 4:3) -> crop left & right
+      cropW = Math.round(srcH * targetRatio);
+      cropH = srcH;
+      cropX = Math.round((srcW - cropW) / 2);
+      cropY = 0;
+    } else if (currentRatio < targetRatio) {
+      // Source is taller than 9:16 -> crop top & bottom
+      cropW = srcW;
+      cropH = Math.round(srcW / targetRatio);
+      cropX = 0;
+      cropY = Math.round((srcH - cropH) / 2);
+    }
+
+    const canvas = targetCanvas || document.createElement('canvas');
+    canvas.width = cropW;
+    canvas.height = cropH;
+
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(source, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+    return canvas;
   }
 
   /**
@@ -60,27 +144,25 @@ class CameraController {
     this.videoElement.setAttribute('muted', '');
     this.videoElement.setAttribute('autoplay', '');
 
-    const isPortrait = window.innerHeight > window.innerWidth;
-    const targetIdealW = isPortrait ? 2160 : 3840;
-    const targetIdealH = isPortrait ? 3840 : 2160;
-
-    // Cascading resolution constraints: avoids rigid 'min' thresholds that cause OverconstrainedError on portrait phones
+    // Cascading resolution constraints: prioritizes 9:16 portrait ratio without rigid 'min' thresholds
     const candidates = [
-      // 1. Ultra-High Resolution (4K UHD)
+      // 1. High Resolution Portrait 9:16 (4K UHD)
       {
         video: {
           facingMode: { ideal: this.currentFacingMode },
-          width: { ideal: targetIdealW },
-          height: { ideal: targetIdealH }
+          aspectRatio: { ideal: 9 / 16 },
+          width: { ideal: 2160 },
+          height: { ideal: 3840 }
         },
         audio: false
       },
-      // 2. Full HD (1080p)
+      // 2. Full HD Portrait 9:16 (1080x1920)
       {
         video: {
           facingMode: { ideal: this.currentFacingMode },
-          width: { ideal: isPortrait ? 1080 : 1920 },
-          height: { ideal: isPortrait ? 1920 : 1080 }
+          aspectRatio: { ideal: 9 / 16 },
+          width: { ideal: 1080 },
+          height: { ideal: 1920 }
         },
         audio: false
       },
@@ -269,73 +351,111 @@ class CameraController {
   }
 
   /**
-   * Captures the current video frame onto a canvas at native video resolution.
-   * Priority 1: W3C ImageCapture API for full native sensor resolution (12MP - 48MP)
-   * Priority 2: Full-resolution video element frame draw with high-quality smoothing
+   * Captures the current video frame onto a canvas in 9:16 portrait mode.
+   * Priority 1: Hardware Still Photo via W3C ImageCapture API (12MP - 48MP)
+   * Priority 2: Video Element Full Resolution Frame Grab
+   * Features:
+   * - Starts flash light / hardware torch automatically when capturing if flashMode is 'on'
+   * - Formats output canvas to exact 9:16 portrait aspect ratio
    * @param {HTMLCanvasElement} [targetCanvas]
+   * @param {Object} [options]
    * @returns {Promise<HTMLCanvasElement>}
    */
-  async captureFrame(targetCanvas = null) {
+  async captureFrame(targetCanvas = null, options = {}) {
     if (!this.videoElement || !this.stream) {
       throw new Error('Camera is not active.');
     }
 
     const track = this.stream.getVideoTracks()[0];
+    const shouldFlash = (options.flash !== undefined) ? options.flash : (this.flashMode === 'on');
+    let torchActivated = false;
 
-    // Priority 1: Hardware Still Photo via ImageCapture API (Android Chrome & Chromium)
-    if (window.ImageCapture && track && track.readyState === 'live') {
-      try {
-        const imageCapture = new ImageCapture(track);
-        let photoBlob = null;
+    // 1. Activate Flash light when capturing image (Hardware torch + visual screen flash burst)
+    if (shouldFlash) {
+      this.triggerScreenFlash();
+
+      if (track) {
         try {
-          const photoCaps = (typeof imageCapture.getPhotoCapabilities === 'function')
-            ? await imageCapture.getPhotoCapabilities().catch(() => null)
-            : null;
-          const photoSettings = {};
-          if (photoCaps && photoCaps.imageWidth && photoCaps.imageWidth.max) {
-            photoSettings.imageWidth = photoCaps.imageWidth.max;
+          const caps = (typeof track.getCapabilities === 'function') ? track.getCapabilities() : {};
+          if (caps && caps.torch) {
+            await track.applyConstraints({
+              advanced: [{ torch: true }]
+            }).catch(() => {});
+            torchActivated = true;
           }
-          if (photoCaps && photoCaps.imageHeight && photoCaps.imageHeight.max) {
-            photoSettings.imageHeight = photoCaps.imageHeight.max;
-          }
-          photoBlob = await imageCapture.takePhoto(Object.keys(photoSettings).length > 0 ? photoSettings : undefined);
-        } catch (_) {
-          photoBlob = await imageCapture.takePhoto().catch(() => null);
-        }
+        } catch (_) {}
+      }
 
-        if (photoBlob && photoBlob.size > 0) {
-          const bitmap = await createImageBitmap(photoBlob);
-          if (bitmap && bitmap.width > 0 && bitmap.height > 0) {
-            const canvas = targetCanvas || document.createElement('canvas');
-            canvas.width = bitmap.width;
-            canvas.height = bitmap.height;
-            const ctx = canvas.getContext('2d');
-            ctx.imageSmoothingEnabled = true;
-            ctx.imageSmoothingQuality = 'high';
-            ctx.drawImage(bitmap, 0, 0);
-            return canvas;
+      // Small pause to allow camera sensor auto-exposure to adapt to flash illumination
+      await new Promise(resolve => setTimeout(resolve, torchActivated ? 160 : 70));
+    }
+
+    let capturedRaw = null;
+
+    try {
+      // Priority 1: Hardware Still Photo via ImageCapture API (Android Chrome & Chromium)
+      if (window.ImageCapture && track && track.readyState === 'live') {
+        try {
+          const imageCapture = new ImageCapture(track);
+          let photoBlob = null;
+          try {
+            const photoCaps = (typeof imageCapture.getPhotoCapabilities === 'function')
+              ? await imageCapture.getPhotoCapabilities().catch(() => null)
+              : null;
+            const photoSettings = {};
+            if (photoCaps && photoCaps.imageWidth && photoCaps.imageWidth.max) {
+              photoSettings.imageWidth = photoCaps.imageWidth.max;
+            }
+            if (photoCaps && photoCaps.imageHeight && photoCaps.imageHeight.max) {
+              photoSettings.imageHeight = photoCaps.imageHeight.max;
+            }
+            if (shouldFlash && photoCaps && photoCaps.fillLightMode && photoCaps.fillLightMode.includes('flash')) {
+              photoSettings.fillLightMode = 'flash';
+            }
+            photoBlob = await imageCapture.takePhoto(Object.keys(photoSettings).length > 0 ? photoSettings : undefined);
+          } catch (_) {
+            photoBlob = await imageCapture.takePhoto().catch(() => null);
           }
+
+          if (photoBlob && photoBlob.size > 0) {
+            const bitmap = await createImageBitmap(photoBlob);
+            if (bitmap && bitmap.width > 0 && bitmap.height > 0) {
+              capturedRaw = bitmap;
+            }
+          }
+        } catch (_) {
+          // Fall back to high-res video element capture below
         }
-      } catch (_) {
-        // Fall back to high-res video element capture below
+      }
+
+      // Priority 2: Video Element Full Resolution Frame Grab
+      if (!capturedRaw) {
+        const video = this.videoElement;
+        const width = video.videoWidth || 1080;
+        const height = video.videoHeight || 1920;
+
+        const vCanvas = document.createElement('canvas');
+        vCanvas.width = width;
+        vCanvas.height = height;
+        const ctx = vCanvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(video, 0, 0, width, height);
+        capturedRaw = vCanvas;
+      }
+    } finally {
+      // Turn off hardware flash torch after capture completes
+      if (torchActivated && track && !this.isTorchOn) {
+        try {
+          await track.applyConstraints({
+            advanced: [{ torch: false }]
+          }).catch(() => {});
+        } catch (_) {}
       }
     }
 
-    // Priority 2: Video Element Full Resolution Frame Grab
-    const video = this.videoElement;
-    const width = video.videoWidth || 1920;
-    const height = video.videoHeight || 1080;
-
-    const canvas = targetCanvas || document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-
-    const ctx = canvas.getContext('2d');
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(video, 0, 0, width, height);
-
-    return canvas;
+    // Always output a crisp 9:16 portrait ratio canvas
+    return this.cropToPortrait916(capturedRaw, targetCanvas);
   }
 
   /**

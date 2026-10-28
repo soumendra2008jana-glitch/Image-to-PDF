@@ -125,10 +125,10 @@ class CropperManager {
 
     const containerH = (clientH > 40)
       ? (clientH - 16)
-      : Math.min(window.innerHeight * 0.46, 480);
+      : Math.min(window.innerHeight * 0.62, 620);
 
     const maxDisplayWidth = Math.max(180, Math.min(containerW, 940));
-    const maxDisplayHeight = Math.max(160, Math.min(containerH, 480));
+    const maxDisplayHeight = Math.max(220, Math.min(containerH, 620));
 
     const srcW = this.sourceCanvas.width;
     const srcH = this.sourceCanvas.height;

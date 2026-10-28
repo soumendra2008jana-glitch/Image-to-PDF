@@ -34,7 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const cameraStatusMsg = document.getElementById('camera-status-msg');
   const cameraSecureHint = document.getElementById('camera-secure-hint');
   const btnToggleCamera = document.getElementById('btn-toggle-camera');
-  const btnToggleTorch = document.getElementById('btn-toggle-torch');
+  const btnToggleFlash = document.getElementById('btn-toggle-flash') || document.getElementById('btn-toggle-torch');
   const btnShutter = document.getElementById('btn-shutter');
 
   const fileInput = document.getElementById('file-input');
@@ -218,10 +218,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       await window.cameraController.startCamera(videoElement);
       cameraPlaceholder.classList.add('hidden');
-      if (window.cameraController.hasTorch) {
-        btnToggleTorch.classList.remove('hidden');
-      } else {
-        btnToggleTorch.classList.add('hidden');
+      if (btnToggleFlash) {
+        btnToggleFlash.classList.remove('hidden');
+        btnToggleFlash.classList.toggle('flash-active', window.cameraController.isFlashEnabled());
       }
     } catch (err) {
       cameraPlaceholder.classList.remove('hidden');
@@ -244,11 +243,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const blobUrl = URL.createObjectURL(file);
         const img = new Image();
         img.onload = () => {
-          const canvas = document.createElement('canvas');
-          canvas.width = img.naturalWidth || img.width;
-          canvas.height = img.naturalHeight || img.height;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0);
+          // Crop to 9:16 portrait aspect ratio canvas
+          const canvas = window.cameraController.cropToPortrait916(img);
           URL.revokeObjectURL(blobUrl);
           cameraNativeInput.value = '';
           loadCapturedImageToCrop(canvas);
@@ -272,10 +268,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  btnToggleTorch.addEventListener('click', async () => {
-    const isOn = await window.cameraController.toggleTorch();
-    btnToggleTorch.style.color = isOn ? '#f59e0b' : '#ffffff';
-  });
+  if (btnToggleFlash) {
+    btnToggleFlash.addEventListener('click', () => {
+      const isFlashOn = window.cameraController.toggleFlashMode() === 'on';
+      btnToggleFlash.classList.toggle('flash-active', isFlashOn);
+      btnToggleFlash.title = isFlashOn ? 'Flash on Capture: ON' : 'Flash on Capture: OFF';
+      showToast(isFlashOn ? 'Flash light on capture: ON' : 'Flash light on capture: OFF', 'info', 1500);
+    });
+  }
 
   // Shutter action: captures live frame when camera active, or guides user to enable camera/upload
   btnShutter.addEventListener('click', async () => {
