@@ -278,16 +278,19 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Shutter action: captures live frame when camera active, or guides user to enable camera/upload
-  btnShutter.addEventListener('click', () => {
+  btnShutter.addEventListener('click', async () => {
     if (window.cameraController.isActive()) {
       if (navigator.vibrate) {
         try { navigator.vibrate(30); } catch (_) {}
       }
       try {
-        const capturedCanvas = window.cameraController.captureFrame();
+        btnShutter.disabled = true;
+        const capturedCanvas = await window.cameraController.captureFrame();
         loadCapturedImageToCrop(capturedCanvas);
       } catch (err) {
         showToast(err.message, 'error');
+      } finally {
+        btnShutter.disabled = false;
       }
     } else {
       // Live camera is inactive: inform user cleanly without triggering unactivated file chooser warnings

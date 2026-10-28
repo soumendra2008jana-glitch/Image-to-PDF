@@ -60,32 +60,83 @@ class CameraController {
     this.videoElement.setAttribute('muted', '');
     this.videoElement.setAttribute('autoplay', '');
 
-    let stream = null;
+    const isPortrait = window.innerHeight > window.innerWidth;
+    const targetIdealW = isPortrait ? 2160 : 3840;
+    const targetIdealH = isPortrait ? 3840 : 2160;
 
-    // 1. Try with ideal facingMode and ultra-high-definition resolution (up to 4K)
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
+    // Cascading resolution constraints: avoids rigid 'min' thresholds that cause OverconstrainedError on portrait phones
+    const candidates = [
+      // 1. Ultra-High Resolution (4K UHD)
+      {
         video: {
           facingMode: { ideal: this.currentFacingMode },
-          width: { ideal: 3840, min: 1280 },
-          height: { ideal: 2160, min: 720 }
+          width: { ideal: targetIdealW },
+          height: { ideal: targetIdealH }
         },
         audio: false
-      });
-    } catch (_) {
-      // 2. Simple fallback: request any available camera
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false
-        });
-      } catch (fallbackErr) {
-        throw this.formatError(fallbackErr);
+      },
+      // 2. Full HD (1080p)
+      {
+        video: {
+          facingMode: { ideal: this.currentFacingMode },
+          width: { ideal: isPortrait ? 1080 : 1920 },
+          height: { ideal: isPortrait ? 1920 : 1080 }
+        },
+        audio: false
+      },
+      // 3. Any high resolution on desired camera
+      {
+        video: {
+          facingMode: { ideal: this.currentFacingMode }
+        },
+        audio: false
+      },
+      // 4. Fallback to default camera
+      {
+        video: true,
+        audio: false
       }
+    ];
+
+    let stream = null;
+    let lastError = null;
+
+    for (const constraints of candidates) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (stream) break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (!stream) {
+      throw this.formatError(lastError);
     }
 
     this.stream = stream;
     this.videoElement.srcObject = stream;
+
+    // Apply continuous hardware autofocus and exposure if supported
+    const track = stream.getVideoTracks()[0];
+    if (track && typeof track.getCapabilities === 'function') {
+      try {
+        const caps = track.getCapabilities();
+        const advanced = {};
+        if (caps.focusMode && caps.focusMode.includes('continuous')) {
+          advanced.focusMode = 'continuous';
+        }
+        if (caps.exposureMode && caps.exposureMode.includes('continuous')) {
+          advanced.exposureMode = 'continuous';
+        }
+        if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('continuous')) {
+          advanced.whiteBalanceMode = 'continuous';
+        }
+        if (Object.keys(advanced).length > 0) {
+          await track.applyConstraints({ advanced: [advanced] }).catch(() => {});
+        }
+      } catch (_) {}
+    }
 
     // Safely start video playback
     try {
@@ -94,8 +145,78 @@ class CameraController {
       // Autoplay may wait for user gesture; safely handled
     }
 
+    // Synchronize viewfinder guide overlay with actual visible video bounds (eliminates zoom mismatch)
+    if (this._onMetadataHandler) {
+      this.videoElement.removeEventListener('loadedmetadata', this._onMetadataHandler);
+      window.removeEventListener('resize', this._onMetadataHandler);
+      if (this._resizeObserver) {
+        this._resizeObserver.disconnect();
+        this._resizeObserver = null;
+      }
+    }
+    this._onMetadataHandler = () => this.updateViewfinderBounds();
+    this.videoElement.addEventListener('loadedmetadata', this._onMetadataHandler);
+    window.addEventListener('resize', this._onMetadataHandler);
+
+    const container = this.videoElement.parentElement;
+    if (container && window.ResizeObserver) {
+      this._resizeObserver = new ResizeObserver(() => this.updateViewfinderBounds());
+      this._resizeObserver.observe(container);
+    }
+
+    if (this.videoElement.videoWidth) {
+      this.updateViewfinderBounds();
+    }
+
     this.checkCapabilities();
     return true;
+  }
+
+  /**
+   * Adjusts the viewfinder overlay so the corner guides and laser line match
+   * the exact visible video bounds (accounting for aspect ratio letterboxing)
+   */
+  updateViewfinderBounds() {
+    if (!this.videoElement || !this.videoElement.videoWidth) return;
+    const container = this.videoElement.parentElement;
+    if (!container) return;
+
+    const vW = this.videoElement.videoWidth;
+    const vH = this.videoElement.videoHeight;
+    const cW = container.clientWidth;
+    const cH = container.clientHeight;
+
+    if (!vW || !vH || !cW || !cH) return;
+
+    const videoRatio = vW / vH;
+    const containerRatio = cW / cH;
+
+    let renderW, renderH, renderX, renderY;
+
+    if (videoRatio > containerRatio) {
+      // Letterbox top and bottom
+      renderW = cW;
+      renderH = cW / videoRatio;
+      renderX = 0;
+      renderY = (cH - renderH) / 2;
+    } else {
+      // Letterbox left and right
+      renderH = cH;
+      renderW = cH * videoRatio;
+      renderX = (cW - renderW) / 2;
+      renderY = 0;
+    }
+
+    const overlay = document.getElementById('viewfinder');
+    if (overlay) {
+      const inset = Math.min(20, Math.min(renderW, renderH) * 0.04);
+      overlay.style.top = `${Math.round(renderY + inset)}px`;
+      overlay.style.left = `${Math.round(renderX + inset)}px`;
+      overlay.style.width = `${Math.round(renderW - (inset * 2))}px`;
+      overlay.style.height = `${Math.round(renderH - (inset * 2))}px`;
+      overlay.style.bottom = 'auto';
+      overlay.style.right = 'auto';
+    }
   }
 
   /**
@@ -148,18 +269,62 @@ class CameraController {
   }
 
   /**
-   * Captures the current video frame onto a canvas at native video resolution
+   * Captures the current video frame onto a canvas at native video resolution.
+   * Priority 1: W3C ImageCapture API for full native sensor resolution (12MP - 48MP)
+   * Priority 2: Full-resolution video element frame draw with high-quality smoothing
    * @param {HTMLCanvasElement} [targetCanvas]
-   * @returns {HTMLCanvasElement}
+   * @returns {Promise<HTMLCanvasElement>}
    */
-  captureFrame(targetCanvas = null) {
+  async captureFrame(targetCanvas = null) {
     if (!this.videoElement || !this.stream) {
       throw new Error('Camera is not active.');
     }
 
+    const track = this.stream.getVideoTracks()[0];
+
+    // Priority 1: Hardware Still Photo via ImageCapture API (Android Chrome & Chromium)
+    if (window.ImageCapture && track && track.readyState === 'live') {
+      try {
+        const imageCapture = new ImageCapture(track);
+        let photoBlob = null;
+        try {
+          const photoCaps = (typeof imageCapture.getPhotoCapabilities === 'function')
+            ? await imageCapture.getPhotoCapabilities().catch(() => null)
+            : null;
+          const photoSettings = {};
+          if (photoCaps && photoCaps.imageWidth && photoCaps.imageWidth.max) {
+            photoSettings.imageWidth = photoCaps.imageWidth.max;
+          }
+          if (photoCaps && photoCaps.imageHeight && photoCaps.imageHeight.max) {
+            photoSettings.imageHeight = photoCaps.imageHeight.max;
+          }
+          photoBlob = await imageCapture.takePhoto(Object.keys(photoSettings).length > 0 ? photoSettings : undefined);
+        } catch (_) {
+          photoBlob = await imageCapture.takePhoto().catch(() => null);
+        }
+
+        if (photoBlob && photoBlob.size > 0) {
+          const bitmap = await createImageBitmap(photoBlob);
+          if (bitmap && bitmap.width > 0 && bitmap.height > 0) {
+            const canvas = targetCanvas || document.createElement('canvas');
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(bitmap, 0, 0);
+            return canvas;
+          }
+        }
+      } catch (_) {
+        // Fall back to high-res video element capture below
+      }
+    }
+
+    // Priority 2: Video Element Full Resolution Frame Grab
     const video = this.videoElement;
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 720;
+    const width = video.videoWidth || 1920;
+    const height = video.videoHeight || 1080;
 
     const canvas = targetCanvas || document.createElement('canvas');
     canvas.width = width;
@@ -177,6 +342,17 @@ class CameraController {
    * Stops active camera tracks and frees hardware resources
    */
   stopCamera() {
+    if (this._onMetadataHandler && this.videoElement) {
+      this.videoElement.removeEventListener('loadedmetadata', this._onMetadataHandler);
+      window.removeEventListener('resize', this._onMetadataHandler);
+      this._onMetadataHandler = null;
+    }
+
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+
     if (this.stream) {
       this.stream.getTracks().forEach(track => {
         try {
@@ -191,6 +367,17 @@ class CameraController {
     }
 
     this.isTorchOn = false;
+
+    // Reset viewfinder to default container bounds
+    const overlay = document.getElementById('viewfinder');
+    if (overlay) {
+      overlay.style.top = '';
+      overlay.style.left = '';
+      overlay.style.width = '';
+      overlay.style.height = '';
+      overlay.style.bottom = '';
+      overlay.style.right = '';
+    }
   }
 
   /**
