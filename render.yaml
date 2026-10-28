@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: webscan-pdf-scanner
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.4
+      - key: MAX_CONTENT_LENGTH_MB
+        value: 50
+      - key: RATE_LIMIT_ENABLED
+        value: true
+      - key: RATE_LIMIT_REQUESTS
+        value: 30

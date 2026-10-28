@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#16a34a">
+  <meta name="description" content="WebScan - High-performance client-side document scanner with auto edge-detection, 4-corner perspective warping, scan filters, and PDF generation.">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://docs.opencv.org 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' data: blob: https: http:; media-src 'self' blob:; object-src 'none'; base-uri 'self';">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="alternate icon" type="image/x-icon" href="favicon.ico">
+  <title>WebScan - Smart Document Scanner & PDF Generator</title>
+
+  <!-- Google Fonts: Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Lucide Icons (CDN) -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
+  <!-- OpenCV.js (Async with status listener) -->
+  <script>
+    window.Module = {
+      onRuntimeInitialized: function() {
+        window.isOpenCvReady = true;
+      }
+    };
+  </script>
+  <script async src="https://docs.opencv.org/4.8.0/opencv.js" id="opencv-script"></script>
+
+  <!-- Main Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" class="app-container">
+    <!-- Top Navigation Bar -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <i data-lucide="scan-line"></i>
+        </div>
+        <div class="brand-text">
+          <h1>WebScan</h1>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button id="btn-header-gallery" class="btn btn-secondary" title="View Document Pages">
+          <i data-lucide="layers"></i>
+          <span class="btn-label">Pages</span>
+          <span class="page-count-badge" id="header-page-count">0</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace Area -->
+    <main class="app-main">
+      <!-- 1. CAPTURE SCREEN (Camera + File Upload) -->
+      <section id="screen-capture" class="view-screen active">
+        <div class="capture-layout">
+          <!-- Live Camera Viewport -->
+          <div class="camera-viewport-card" id="camera-container">
+            <video id="camera-stream" autoplay playsinline muted></video>
+            <div id="camera-placeholder" class="camera-placeholder hidden">
+              <div class="placeholder-icon-wrap">
+                <i data-lucide="camera-off" class="placeholder-icon"></i>
+              </div>
+              <p id="camera-status-msg" class="camera-status-msg">Camera is inactive</p>
+              <div class="camera-placeholder-actions">
+                <button id="btn-request-camera" class="btn btn-primary" type="button">
+                  <i data-lucide="video"></i> Start Live Camera
+                </button>
+                <label for="camera-native-input" id="btn-native-camera" class="btn btn-secondary" role="button" tabindex="0">
+                  <i data-lucide="camera"></i> Take Photo with Phone Camera
+                </label>
+              </div>
+              <p class="camera-secure-hint" id="camera-secure-hint">
+                <i data-lucide="info"></i> Tap the lock icon (🔒) in your browser's address bar to Allow camera access.
+              </p>
+            </div>
+
+            <!-- Focus animation & alignment guides -->
+            <div class="viewfinder-overlay" id="viewfinder">
+              <div class="corner-guide top-left"></div>
+              <div class="corner-guide top-right"></div>
+              <div class="corner-guide bottom-left"></div>
+              <div class="corner-guide bottom-right"></div>
+              <div class="scan-laser-line"></div>
+              <div class="guide-hint">Align document within frame</div>
+            </div>
+
+            <!-- Floating In-Camera Controls -->
+            <div class="camera-controls-floating">
+              <button id="btn-toggle-camera" class="btn-icon-circle" title="Switch Camera (Front/Back)">
+                <i data-lucide="switch-camera"></i>
+              </button>
+              <button id="btn-toggle-torch" class="btn-icon-circle hidden" title="Toggle Flashlight">
+                <i data-lucide="zap"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Capture Actions Bar -->
+          <div class="capture-actions-card">
+            <!-- Alternative Upload Dropzone -->
+            <div class="upload-dropzone" id="upload-dropzone">
+              <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" multiple class="file-input-hidden">
+              <input type="file" id="camera-native-input" accept="image/*" capture="environment" class="file-input-hidden">
+              <div class="dropzone-content">
+                <i data-lucide="upload-cloud" class="dropzone-icon"></i>
+                <div class="dropzone-text">
+                  <span class="dropzone-title">Upload Image or Drag & Drop</span>
+                  <span class="dropzone-sub">Supports JPG, PNG, WEBP (Single or Multi-file)</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Shutter Controls -->
+            <div class="shutter-row">
+              <button id="btn-open-gallery" class="btn btn-icon-lg" title="Open Pages Gallery">
+                <i data-lucide="images"></i>
+                <span class="gallery-badge" id="shutter-page-count">0</span>
+              </button>
+
+              <button id="btn-shutter" class="btn-shutter" type="button" title="Take Photo">
+                <div class="shutter-inner"></div>
+              </button>
+
+              <button id="btn-select-file" class="btn btn-icon-lg" title="Browse Files">
+                <i data-lucide="folder-open"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. CROP & WARP SCREEN (Interactive 4-Corner Quad Transform) -->
+      <section id="screen-crop" class="view-screen">
+        <div class="crop-layout">
+          <div class="crop-header">
+            <div class="crop-header-info">
+              <h2>Adjust Document Corners</h2>
+              <p>Drag the 4 glowing points to match the document boundaries</p>
+            </div>
+            <div class="crop-header-actions">
+              <button id="btn-auto-detect" class="btn btn-secondary" title="Auto-detect document edges">
+                <i data-lucide="sparkles"></i> Auto-Detect
+              </button>
+              <button id="btn-detect-content" class="btn btn-ghost" title="Crop to important document text & content area">
+                <i data-lucide="file-text"></i> Crop Content
+              </button>
+              <button id="btn-reset-crop" class="btn btn-ghost" title="Reset to full image">
+                <i data-lucide="maximize"></i> Full Image
+              </button>
+              <button id="btn-rotate-capture" class="btn btn-ghost" title="Rotate 90 degrees">
+                <i data-lucide="rotate-cw"></i> Rotate
+              </button>
+            </div>
+          </div>
+
+          <!-- Canvas Workspace with Draggable Corners -->
+          <div class="crop-workspace-container" id="crop-workspace">
+            <div class="crop-canvas-wrapper" id="crop-canvas-wrapper">
+              <canvas id="crop-canvas"></canvas>
+              <!-- Interactive SVG Overlay for quad polygon and handles -->
+              <svg id="crop-svg-overlay">
+                <polygon id="crop-polygon" class="crop-polygon" points=""></polygon>
+              </svg>
+              <!-- 4 Draggable Corner Handles -->
+              <div id="corner-tl" class="crop-handle" data-corner="tl">
+                <div class="handle-ring"></div>
+                <span class="handle-tag">TL</span>
+              </div>
+              <div id="corner-tr" class="crop-handle" data-corner="tr">
+                <div class="handle-ring"></div>
+                <span class="handle-tag">TR</span>
+              </div>
+              <div id="corner-br" class="crop-handle" data-corner="br">
+                <div class="handle-ring"></div>
+                <span class="handle-tag">BR</span>
+              </div>
+              <div id="corner-bl" class="crop-handle" data-corner="bl">
+                <div class="handle-ring"></div>
+                <span class="handle-tag">BL</span>
+              </div>
+
+              <!-- Magnifying Loupe for Precision Editing -->
+              <div id="crop-loupe" class="crop-loupe hidden">
+                <canvas id="loupe-canvas" width="130" height="130"></canvas>
+                <div class="loupe-crosshair"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Crop Bottom Action Bar -->
+          <div class="crop-footer">
+            <button id="btn-cancel-crop" class="btn btn-secondary">
+              <i data-lucide="arrow-left"></i> Retake / Back
+            </button>
+            <button id="btn-apply-crop" class="btn btn-primary">
+              <i data-lucide="check"></i> Warp & Enhance
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. FILTER & ENHANCE SCREEN -->
+      <section id="screen-filter" class="view-screen">
+        <div class="filter-layout">
+          <div class="filter-header">
+            <div class="filter-header-info">
+              <h2>Filter & Document Enhancement</h2>
+              <p>Apply scanner filters to remove shadows and enhance text clarity</p>
+            </div>
+            <div class="filter-header-actions">
+              <button id="btn-rotate-warped" class="btn btn-ghost" title="Rotate document">
+                <i data-lucide="rotate-cw"></i> Rotate
+              </button>
+            </div>
+          </div>
+
+          <div class="filter-preview-workspace">
+            <div class="preview-canvas-wrapper">
+              <canvas id="filter-canvas"></canvas>
+              <div id="filter-processing-spinner" class="processing-spinner-overlay hidden">
+                <div class="spinner"></div>
+                <span>Applying Filter...</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Preset Selector & Sliders -->
+          <div class="filter-controls-card">
+            <!-- Filter Presets Tabs -->
+            <div class="filter-presets-row">
+              <button class="preset-btn active" data-preset="original">
+                <i data-lucide="image"></i>
+                <span>Original</span>
+              </button>
+              <button class="preset-btn" data-preset="magic">
+                <i data-lucide="wand-2"></i>
+                <span>Magic Color</span>
+              </button>
+              <button class="preset-btn" data-preset="bw">
+                <i data-lucide="file-text"></i>
+                <span>B&W Document</span>
+              </button>
+              <button class="preset-btn" data-preset="grayscale">
+                <i data-lucide="blend"></i>
+                <span>Grayscale</span>
+              </button>
+            </div>
+
+            <!-- Manual Fine-tuning Sliders -->
+            <div class="filter-sliders-grid">
+              <div class="slider-group">
+                <div class="slider-label">
+                  <span><i data-lucide="sun"></i> Brightness</span>
+                  <span id="val-brightness">0</span>
+                </div>
+                <input type="range" id="slider-brightness" min="-100" max="100" value="0">
+              </div>
+
+              <div class="slider-group">
+                <div class="slider-label">
+                  <span><i data-lucide="contrast"></i> Contrast</span>
+                  <span id="val-contrast">0</span>
+                </div>
+                <input type="range" id="slider-contrast" min="-100" max="100" value="0">
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="filter-footer-row">
+              <button id="btn-back-to-crop" class="btn btn-secondary">
+                <i data-lucide="crop"></i> Re-Crop
+              </button>
+              <button id="btn-save-page" class="btn btn-primary">
+                <i data-lucide="check-circle-2"></i> Save Page to Document
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. GALLERY & PDF EXPORT SCREEN -->
+      <section id="screen-gallery" class="view-screen">
+        <div class="gallery-layout">
+          <div class="gallery-header">
+            <div>
+              <h2>Document Pages (<span id="gallery-total-count">0</span>)</h2>
+              <p>Reorder, review, or add more pages before generating your PDF</p>
+            </div>
+
+            <div class="gallery-header-buttons">
+              <button id="btn-add-more-camera" class="btn btn-secondary">
+                <i data-lucide="camera"></i> Scan More
+              </button>
+              <button id="btn-add-more-upload" class="btn btn-secondary">
+                <i data-lucide="upload"></i> Upload More
+              </button>
+            </div>
+          </div>
+
+          <!-- Document Settings Bar -->
+          <div class="doc-settings-bar">
+            <div class="doc-input-group">
+              <label for="doc-filename"><i data-lucide="file"></i> Document Name</label>
+              <input type="text" id="doc-filename" value="Scanned_Document" placeholder="Enter document name">
+            </div>
+
+            <div class="doc-input-group">
+              <label for="pdf-page-size"><i data-lucide="file-check"></i> Page Format</label>
+              <select id="pdf-page-size">
+                <option value="A4" selected>A4 (Standard)</option>
+                <option value="US_Letter">US Letter</option>
+                <option value="Fit">Fit to Image Size</option>
+              </select>
+            </div>
+
+            <div class="doc-input-group">
+              <label for="pdf-orientation"><i data-lucide="compass"></i> Orientation</label>
+              <select id="pdf-orientation">
+                <option value="auto" selected>Auto</option>
+                <option value="portrait">Portrait</option>
+                <option value="landscape">Landscape</option>
+              </select>
+            </div>
+
+            <div class="doc-input-group">
+              <label for="pdf-target-size-value"><i data-lucide="gauge"></i> Target PDF Size</label>
+              <div class="input-with-unit">
+                <input type="number" id="pdf-target-size-value" placeholder="Auto / No limit" min="10" step="1">
+                <select id="pdf-target-size-unit">
+                  <option value="KB" selected>KB</option>
+                  <option value="MB">MB</option>
+                </select>
+              </div>
+              <div class="size-presets">
+                <button type="button" class="size-chip active" data-val="" data-unit="KB">Max</button>
+                <button type="button" class="size-chip" data-val="200" data-unit="KB">200KB</button>
+                <button type="button" class="size-chip" data-val="500" data-unit="KB">500KB</button>
+                <button type="button" class="size-chip" data-val="1" data-unit="MB">1MB</button>
+                <button type="button" class="size-chip" data-val="2" data-unit="MB">2MB</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Thumbnail Grid -->
+          <div class="pages-grid" id="pages-grid">
+            <!-- Dynamic page cards rendered here -->
+          </div>
+
+          <!-- Empty State (When no pages captured) -->
+          <div id="gallery-empty-state" class="gallery-empty-state">
+            <div class="empty-icon-wrap">
+              <i data-lucide="files"></i>
+            </div>
+            <h3>No Pages Scanned Yet</h3>
+            <p>Capture a photo with your camera or upload an image file to begin building your PDF document.</p>
+            <div class="empty-actions">
+              <button id="btn-empty-camera" class="btn btn-primary">
+                <i data-lucide="camera"></i> Open Camera
+              </button>
+              <button id="btn-empty-upload" class="btn btn-secondary">
+                <i data-lucide="upload-cloud"></i> Upload Image
+              </button>
+            </div>
+          </div>
+
+          <!-- Export Action Bar -->
+          <div class="gallery-export-bar">
+            <div class="export-summary">
+              <span id="export-summary-text">Ready to compile 0 pages</span>
+            </div>
+            <div class="export-buttons">
+              <button id="btn-clear-all" class="btn btn-danger-ghost">
+                <i data-lucide="trash-2"></i> Clear All
+              </button>
+              <button id="btn-generate-pdf" class="btn btn-primary btn-generate-pulse">
+                <i data-lucide="download"></i> Generate & Download PDF
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Global Toast Notification Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Hidden Master Canvases for offscreen processing -->
+    <canvas id="hidden-capture-canvas" class="hidden"></canvas>
+    <canvas id="hidden-transform-canvas" class="hidden"></canvas>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/camera.js"></script>
+  <script src="js/cropper_utils.js"></script>
+  <script src="js/filter_utils.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    // Initialize Lucide icons on load
+    window.addEventListener('DOMContentLoaded', () => {
+      if (window.lucide) {
+        lucide.createIcons();
+      }
+    });
+  </script>
+</body>
+</html>
